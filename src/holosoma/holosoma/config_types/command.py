@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic.dataclasses import dataclass
 
@@ -95,9 +95,27 @@ class MotionConfig:
     body_names_to_track: list[str]
     """Key body names to track, used for reward/termination computation."""
 
+    motion_files: list[str] = field(default_factory=list)
+    """Optional explicit list of motion files. When set, this overrides ``motion_file``."""
+
+    motion_glob: str | None = None
+    """Optional glob pattern used to discover multiple motion files for multi-clip training."""
+
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
+
+    clip_weighting_strategy: Literal["uniform_step", "uniform_clip", "success_rate_adaptive"] = "uniform_clip"
+    """How to sample clips when multiple motion files are provided."""
+
+    min_weight_factor: float = 0.25
+    """Minimum adaptive multiplier relative to uniform-clip weighting."""
+
+    max_weight_factor: float = 4.0
+    """Maximum adaptive multiplier relative to uniform-clip weighting."""
+
+    adaptive_clip_weight_update_interval: int = 512
+    """Number of finished episodes between adaptive clip-weight updates."""
 
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""

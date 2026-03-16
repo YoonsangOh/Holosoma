@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from holosoma.managers.command.terms.wbt import MotionCommand
-from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
+from holosoma.utils.rotations import (
+    calc_heading,
+    get_euler_xyz,
+    normalize_angle,
+    quat_rotate_inverse,
+    quaternion_to_matrix,
+    subtract_frame_transforms,
+)
 from holosoma.utils.torch_utils import get_axis_params, to_torch
 
 if TYPE_CHECKING:
@@ -158,6 +165,31 @@ def motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return mat[..., :2].reshape(mat.shape[0], -1)
 
 
+def torso_xy_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Reference torso xy offset in the robot torso frame."""
+    return motion_ref_pos_b(env)[:, :2]
+
+
+def torso_yaw_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Reference torso heading error in radians."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    heading_error = calc_heading(motion_command.ref_quat_w) - calc_heading(motion_command.robot_ref_quat_w)
+    return normalize_angle(heading_error).unsqueeze(-1)
+
+
+def target_joint_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target joint positions relative to the robot's nominal pose."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.joint_pos - env.default_dof_pos_base
+
+
+def target_root_roll_pitch(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target root roll/pitch for stage-1 style tracking inputs."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    roll, pitch, _ = get_euler_xyz(motion_command.root_quat_w, w_last=True)
+    return torch.stack([normalize_angle(roll), normalize_angle(pitch)], dim=-1)
+
+
 def robot_body_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
 
@@ -253,8 +285,6 @@ def future_motion_targets(
     Returns:
         Tensor of shape [num_envs, future_num_steps * feature_dim]
     """
-    from holosoma.utils.rotations import get_euler_xyz, quat_rotate_inverse
-    
     motion_command = _get_motion_command_and_assert_type(env)
     motion = motion_command.motion
     
@@ -270,7 +300,8 @@ def future_motion_targets(
     # Current time steps + future offsets, clamped to valid range
     current_time_steps = motion_command.time_steps  # [num_envs]
     future_time_steps = current_time_steps[:, None] + tar_obs_steps[None, :]  # [num_envs, future_num_steps]
-    future_time_steps = torch.clamp(future_time_steps, 0, motion.time_step_total - 1)
+    future_clip_lengths = motion.clip_lengths_for(motion_command.clip_ids)[:, None]
+    future_time_steps = torch.minimum(future_time_steps, future_clip_lengths - 1)
     
     num_envs = env.num_envs
     num_steps = future_num_steps
@@ -279,12 +310,9 @@ def future_motion_targets(
     # root pos/quat from body_pos_w[:, 0] and body_quat_w[:, 0]
     # Shape after indexing: [num_envs, future_num_steps, ...]
     
-    # Use advanced indexing to get data for each env at each future timestep
-    env_indices = torch.arange(num_envs, device=env.device)[:, None].expand(-1, num_steps)
-    
     # Root position and quaternion (pelvis = body index 0)
-    root_pos = motion._body_pos_w[future_time_steps, 0]  # [num_envs, num_steps, 3]
-    root_quat = motion._body_quat_w[future_time_steps, 0]  # [num_envs, num_steps, 4]
+    root_pos = motion_command._gather_motion("body_pos_w", future_time_steps, index=0)  # [num_envs, num_steps, 3]
+    root_quat = motion_command._gather_motion("body_quat_w", future_time_steps, index=0)  # [num_envs, num_steps, 4]
     
     # Root height
     root_height = root_pos[..., 2:3]  # [num_envs, num_steps, 1]
@@ -294,25 +322,27 @@ def future_motion_targets(
     roll_pitch = torch.stack([roll, pitch], dim=-1).reshape(num_envs, num_steps, 2)
     
     # Base linear velocity (from body_lin_vel_w)
-    base_lin_vel = motion._body_lin_vel_w[future_time_steps, 0]  # [num_envs, num_steps, 3]
+    base_lin_vel = motion_command._gather_motion("body_lin_vel_w", future_time_steps, index=0)  # [num_envs, num_steps, 3]
     
     # Base angular velocity (yaw component only)
-    base_ang_vel = motion._body_ang_vel_w[future_time_steps, 0]  # [num_envs, num_steps, 3]
+    base_ang_vel = motion_command._gather_motion("body_ang_vel_w", future_time_steps, index=0)  # [num_envs, num_steps, 3]
     base_yaw_vel = base_ang_vel[..., 2:3]  # [num_envs, num_steps, 1]
     
     # Joint positions (relative to default)
     # NOTE: Use default_dof_pos_base (without randomization bias) for motion reference data
     # This ensures consistent normalization across environments and matches inference behavior
-    dof_pos = motion._joint_pos[future_time_steps][:, :, motion._joint_indexes]  # [num_envs, num_steps, num_dofs]
+    dof_pos = motion_command._gather_motion("joint_pos", future_time_steps)  # [num_envs, num_steps, num_dofs]
     default_dof_pos = env.default_dof_pos_base[:, None, :]  # [1, 1, num_dofs] - base values without bias
     dof_pos_rel = dof_pos - default_dof_pos  # [num_envs, num_steps, num_dofs]
     
     # Local key body positions (tracked bodies relative to root) — optional
     if include_key_body_pos:
-        # motion.body_pos_w is motion._body_pos_w[:, motion._body_indexes][:, tracked_body_indexes]; use 14 tracked bodies only
-        body_pos_robot_order = motion._body_pos_w[future_time_steps][:, :, motion._body_indexes]  # [num_envs, num_steps, num_robot_bodies, 3]
         tracked_body_indexes = motion_command.tracked_body_indexes  # [14]
-        tracked_body_pos = body_pos_robot_order[:, :, tracked_body_indexes]  # [num_envs, num_steps, 14, 3]
+        tracked_body_pos = motion_command._gather_motion(
+            "body_pos_w",
+            future_time_steps,
+            index=tracked_body_indexes,
+        )  # [num_envs, num_steps, 14, 3]
         root_pos_expanded = root_pos[:, :, None, :]  # [num_envs, num_steps, 1, 3]
         root_quat_expanded = root_quat[:, :, None, :]  # [num_envs, num_steps, 1, 4]
         local_body_pos = tracked_body_pos - root_pos_expanded  # [num_envs, num_steps, 14, 3]

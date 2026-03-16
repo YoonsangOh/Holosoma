@@ -18,7 +18,10 @@ Thumbs.db
 
 # Experiment logs
 logs
+logs/
 logs_eval
+data/
+tmp/
 
 # Isaacsim Converted Files
 src/holosoma/holosoma/data/robots/converted/

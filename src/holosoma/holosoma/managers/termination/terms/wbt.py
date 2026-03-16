@@ -22,7 +22,7 @@ from holosoma.utils.safe_torch_import import torch
 def motion_ends(env, **_) -> torch.Tensor:
     """Terminate if the motion ends."""
     motion_command = env.command_manager.get_state("motion_command")
-    return motion_command.time_steps >= motion_command.motion.time_step_total - 2
+    return motion_command.motion_end_mask()
 
 
 class BadTracking(TerminationTermBase):
@@ -128,6 +128,51 @@ class BadTracking(TerminationTermBase):
     #########################################################################################################
     ## Internal Helper functions
     #########################################################################################################
+    def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
+        indexes = []
+        for name in a_names:
+            assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
+            indexes.append(b_names.index(name))
+        return torch.tensor(indexes, dtype=torch.long, device=device)
+
+
+class TrackedBodyPositionErrorThreshold(TerminationTermBase):
+    """Terminate when any tracked body deviates too far from the reference motion."""
+
+    def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.threshold = cfg.params["threshold"]
+        self.min_steps_before_check = cfg.params.get("min_steps_before_check", 2)
+        self.body_names_to_track = cfg.params["body_names_to_track"]
+        self.body_indexes: torch.Tensor | None = None
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        if self.env.is_evaluating:
+            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+        motion_command = self.env.command_manager.get_state("motion_command")
+        if self.body_indexes is None:
+            self.body_indexes = self._get_index_of_a_in_b(
+                self.body_names_to_track,
+                motion_command.motion_cfg.body_names_to_track,
+                env.device,
+            )
+        error = torch.norm(
+            motion_command.body_pos_relative_w[:, self.body_indexes] - motion_command.robot_body_pos_w[:, self.body_indexes],
+            dim=-1,
+        )
+        bad_tracking = torch.any(error > self.threshold, dim=-1)
+        bad_tracking &= self.env.episode_length_buf >= self.min_steps_before_check
+
+        if motion_command.motion_cfg.use_adaptive_timesteps_sampler and torch.any(bad_tracking):
+            failed_at_time_step = motion_command.time_steps[bad_tracking]
+            motion_command.adaptive_timesteps_sampler.update_current_bin_failed_count(failed_at_time_step)
+
+        return bad_tracking
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
         for name in a_names:

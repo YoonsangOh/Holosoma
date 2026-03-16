@@ -264,7 +264,7 @@ class MetricsCollector:
                     # Get ALL body positions from motion and simulator (30 bodies, excluding contact points)
                     # motion.body_pos_w[time_steps] gives [num_envs, num_bodies, 3] but needs env_origins added
                     ref_body_pos_all = (
-                        motion_cmd.motion.body_pos_w[motion_cmd.time_steps] 
+                        motion_cmd._gather_motion("body_pos_w", motion_cmd.time_steps)
                         + env.simulator.scene.env_origins[:, None, :]
                     )  # [num_envs, 32, 3]
                     robot_body_pos_all = env.simulator._rigid_body_pos  # [num_envs, 32, 3]

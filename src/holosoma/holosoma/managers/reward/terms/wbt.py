@@ -134,10 +134,28 @@ def motion_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma
     return torch.exp(-error / sigma**2)
 
 
+def motion_joint_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.sum(torch.square(motion_command.joint_pos - motion_command.robot_joint_pos), dim=-1)
+    return torch.exp(-error / sigma**2)
+
+
+def motion_joint_velocity_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.sum(torch.square(motion_command.joint_vel - motion_command.robot_joint_vel), dim=-1)
+    return torch.exp(-error / sigma**2)
+
+
 def motion_relative_body_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_pos_relative_w - motion_command.robot_body_pos_w), dim=-1)
     return torch.exp(-error.mean(-1) / sigma**2)
+
+
+def motion_relative_body_position_error_exp_sum(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.sum(torch.square(motion_command.body_pos_relative_w - motion_command.robot_body_pos_w), dim=(-1, -2))
+    return torch.exp(-error / sigma**2)
 
 
 def motion_relative_body_orientation_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
@@ -150,6 +168,12 @@ def motion_global_body_lin_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=-1)
     return torch.exp(-error.mean(-1) / sigma**2)
+
+
+def motion_global_body_lin_vel_exp_sum(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.sum(torch.square(motion_command.body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=(-1, -2))
+    return torch.exp(-error / sigma**2)
 
 
 def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:

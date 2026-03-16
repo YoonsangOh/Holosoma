@@ -14,6 +14,16 @@ init_pose_config = NoiseToInitialPoseConfig(
     object_pos=[0.05, 0.05, 0.0],
 )
 
+lafan_init_pose_config = NoiseToInitialPoseConfig(
+    overall_noise_scale=0.35,
+    dof_pos=0.03,
+    root_pos=[0.015, 0.015, 0.005],
+    root_rot=[0.03, 0.03, 0.05],
+    root_lin_vel=[0.05, 0.05, 0.02],
+    root_ang_vel=[0.05, 0.05, 0.05],
+    object_pos=[0.0, 0.0, 0.0],
+)
+
 motion_config = MotionConfig(
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz",
     body_names_to_track=[
@@ -40,6 +50,19 @@ motion_config = MotionConfig(
 motion_config_w_object = replace(
     motion_config,
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
+)
+
+motion_config_lafan_multiclip = replace(
+    motion_config,
+    motion_glob="data/unitree_lafan_29dof/lafan_replay_data/*.npz",
+    motion_files=[],
+    clip_weighting_strategy="success_rate_adaptive",
+    adaptive_clip_weight_update_interval=512,
+    start_at_timestep_zero_prob=0.0,
+    freeze_at_timestep_zero_prob=0.0,
+    enable_default_pose_prepend=False,
+    enable_default_pose_append=False,
+    noise_to_initial_pose=lafan_init_pose_config,
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(
@@ -76,7 +99,20 @@ g1_29dof_wbt_command_w_object = replace(
     },
 )
 
+g1_29dof_wbt_command_lafan_multiclip = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_lafan_multiclip,
+            },
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
+    "g1_29dof_wbt_command_lafan_multiclip",
     "g1_29dof_wbt_command_w_object",
 ]

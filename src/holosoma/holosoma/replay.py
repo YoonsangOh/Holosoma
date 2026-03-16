@@ -27,10 +27,18 @@ def replay(tyro_config: ExperimentConfig):
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     env = get_class(env_target)(tyro_env_config, device=device)
 
+    recorder = env.simulator.video_recorder
+    if recorder is not None and recorder.enabled and not recorder.is_recording:
+        recorder.start_recording(episode_id=0)
+
     done = False
     while not done:
-        env.simulator.sim.step()
         done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
+        if recorder is not None and recorder.enabled:
+            env.simulator.capture_video_frame(env_id=0)
+
+    if recorder is not None and recorder.enabled and recorder.is_recording:
+        recorder.stop_recording()
 
     close_simulation_app(simulation_app)
 

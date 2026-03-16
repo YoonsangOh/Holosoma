@@ -4,6 +4,7 @@ import builtins
 import copy
 import dataclasses
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -226,7 +227,16 @@ class IsaacSim(BaseSimulator):
 
             # Get local rank to avoid race conditions in multi-GPU setups
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-            usd_conversion_dir = os.path.abspath(os.path.join(asset_root, f"converted_rank{local_rank}"))
+            usd_conversion_root = os.environ.get("HOLOSOMA_USD_CONVERSION_ROOT")
+            if usd_conversion_root:
+                usd_conversion_dir = os.path.abspath(os.path.join(usd_conversion_root, f"converted_rank{local_rank}"))
+            else:
+                # Omniverse/USD writes are unreliable on some NAS-backed workspaces. Prefer a local tmp cache unless
+                # the caller explicitly overrides the destination.
+                usd_conversion_dir = os.path.abspath(
+                    os.path.join(tempfile.gettempdir(), "holosoma_usd_cache", f"converted_rank{local_rank}")
+                )
+            os.makedirs(usd_conversion_dir, exist_ok=True)
 
             spawn = sim_utils.UrdfFileCfg(
                 usd_dir=usd_conversion_dir,
@@ -376,8 +386,9 @@ class IsaacSim(BaseSimulator):
 
         self._robot = Articulation(robot_articulation_config)
 
-        print_prim_tree("/World/envs/env_0/Robot")
-        log_robot_properties("/World/envs/env_0/Robot", "*")
+        if os.environ.get("HOLOSOMA_ISAAC_DEBUG_PRIMS", "0") == "1":
+            print_prim_tree("/World/envs/env_0/Robot")
+            log_robot_properties("/World/envs/env_0/Robot", "*")
 
         self.scene.articulations["robot"] = self._robot
 
@@ -1038,6 +1049,8 @@ class IsaacSim(BaseSimulator):
         """
         if env_ids is None:
             env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
+        else:
+            env_ids = env_ids.to(device=self.sim_device, dtype=torch.long)
 
         if root_states is None:
             robot_root_states = self.robot_root_states
@@ -1049,8 +1062,14 @@ class IsaacSim(BaseSimulator):
         else:
             raise ValueError(f"Unexpected root states type: {type(root_states)}")
 
-        self._robot.write_root_pose_to_sim(robot_root_states._get_wxyz(env_ids)[:, :7], env_ids)
-        self._robot.write_root_velocity_to_sim(robot_root_states._get_wxyz(env_ids)[:, 7:], env_ids)
+        # IsaacLab 5.1 state writes with explicit env_ids can silently fail for articulation roots.
+        # Work around this by composing full-state tensors and writing all environments at once.
+        desired_root_wxyz = robot_root_states._get_wxyz(env_ids)
+        full_root_wxyz = self._robot.data.root_state_w.clone()
+        full_root_wxyz[env_ids] = desired_root_wxyz
+
+        self._robot.write_root_pose_to_sim(full_root_wxyz[:, :7])
+        self._robot.write_root_velocity_to_sim(full_root_wxyz[:, 7:])
 
     def set_dof_state_tensor_robots(self, env_ids=None, dof_states=None):
         """See base class.
@@ -1069,12 +1088,37 @@ class IsaacSim(BaseSimulator):
         """
         if env_ids is None:
             env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
+        else:
+            env_ids = env_ids.to(device=self.sim_device, dtype=torch.long)
 
         if dof_states is None:
             dof_states = self.dof_state
 
-        dof_pos, dof_vel = dof_states[env_ids, :, 0], dof_states[env_ids, :, 1]
-        self._robot.write_joint_state_to_sim(dof_pos, dof_vel, self.dof_ids, env_ids)
+        if dof_states.ndim != 3 or dof_states.shape[2] != 2:
+            raise ValueError(
+                f"Expected dof_states shape [num_envs, num_dofs, 2], got {tuple(dof_states.shape)}"
+            )
+
+        # Support both full-batch and subset tensors.
+        if dof_states.shape[0] == env_ids.numel():
+            desired_dof_states = dof_states
+        elif dof_states.shape[0] == getattr(self, "num_envs", self.training_config.num_envs):
+            desired_dof_states = dof_states[env_ids]
+        else:
+            raise ValueError(
+                "dof_states first dimension must match either num_envs or len(env_ids), "
+                f"got {dof_states.shape[0]} for len(env_ids)={env_ids.numel()}"
+            )
+
+        # IsaacLab 5.1 writes with joint_ids/env_ids can silently fail for this articulation.
+        # Build full articulation-order joint tensors and write all joints in one call.
+        full_joint_pos = self._robot.data.joint_pos.clone()
+        full_joint_vel = self._robot.data.joint_vel.clone()
+        dof_ids = torch.as_tensor(self.dof_ids, dtype=torch.long, device=self.sim_device)
+        full_joint_pos[env_ids.unsqueeze(1), dof_ids.unsqueeze(0)] = desired_dof_states[:, :, 0]
+        full_joint_vel[env_ids.unsqueeze(1), dof_ids.unsqueeze(0)] = desired_dof_states[:, :, 1]
+
+        self._robot.write_joint_state_to_sim(full_joint_pos, full_joint_vel)
 
     def get_actor_indices(self, names: str | ActorNames, env_ids: EnvIds | None = None) -> ActorIndices:
         """See base class."""

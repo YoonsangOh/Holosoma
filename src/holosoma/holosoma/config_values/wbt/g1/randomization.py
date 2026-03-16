@@ -1,5 +1,7 @@
 """Whole Body Tracking randomization presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 
 robot_state_dr_at_setup = {
@@ -128,6 +130,57 @@ g1_29dof_wbt_randomization = RandomizationManagerCfg(
     step_terms={**base_step_terms},
 )
 
+g1_29dof_wbt_randomization_lafan_pretrain = replace(
+    g1_29dof_wbt_randomization,
+    setup_terms={
+        **base_setup_terms,
+        "push_randomizer_state": replace(
+            base_setup_terms["push_randomizer_state"],
+            params={
+                **base_setup_terms["push_randomizer_state"].params,
+                "enabled": False,
+            },
+        ),
+        "randomize_base_com_startup": replace(
+            robot_state_dr_at_setup["randomize_base_com_startup"],
+            params={
+                **robot_state_dr_at_setup["randomize_base_com_startup"].params,
+                "enabled": False,
+            },
+        ),
+        "setup_dof_pos_bias": replace(
+            robot_state_dr_at_setup["setup_dof_pos_bias"],
+            params={
+                **robot_state_dr_at_setup["setup_dof_pos_bias"].params,
+                "enabled": False,
+                "dof_pos_bias_range": [0.0, 0.0],
+            },
+        ),
+    },
+    reset_terms={
+        **base_reset_terms,
+        "randomize_push_schedule": replace(
+            base_reset_terms["randomize_push_schedule"],
+            params={"enabled": False},
+        ),
+        "randomize_dof_state": replace(
+            base_reset_terms["randomize_dof_state"],
+            params={
+                **base_reset_terms["randomize_dof_state"].params,
+                "joint_pos_bias_range": [0.0, 0.0],
+                "randomize_dof_pos_bias": False,
+            },
+        ),
+    },
+    step_terms={
+        **base_step_terms,
+        "apply_pushes": replace(
+            base_step_terms["apply_pushes"],
+            params={"enabled": False},
+        ),
+    },
+)
+
 g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     setup_terms={
         **base_setup_terms,
@@ -141,4 +194,8 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object"]
+__all__ = [
+    "g1_29dof_wbt_randomization",
+    "g1_29dof_wbt_randomization_lafan_pretrain",
+    "g1_29dof_wbt_randomization_w_object",
+]

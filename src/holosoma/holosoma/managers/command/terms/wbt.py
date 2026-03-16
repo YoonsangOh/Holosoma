@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import math
 import re
 from typing import Any, List
@@ -158,6 +159,116 @@ class MotionLoader:
         return self
 
 
+class MotionLibrary:
+    """Collection of compatible motion clips with batched per-env gathering helpers."""
+
+    def __init__(
+        self,
+        motion_files: list[str],
+        robot_body_names: list[str],
+        robot_joint_names: list[str],
+        device: str = "cpu",
+    ):
+        if not motion_files:
+            raise ValueError("At least one motion file is required.")
+
+        self.device = device
+        self.motion_files = [resolve_data_file_path(path) for path in motion_files]
+        self.motions = [
+            MotionLoader(motion_file, robot_body_names, robot_joint_names, device=device)
+            for motion_file in self.motion_files
+        ]
+        self._validate_compatibility()
+        self._refresh_metadata()
+
+    def _validate_compatibility(self) -> None:
+        reference = self.motions[0]
+        for clip_idx, motion in enumerate(self.motions[1:], start=1):
+            if int(motion.fps) != int(reference.fps):
+                raise ValueError(
+                    f"All clips must share the same FPS. Clip 0 has {reference.fps}, clip {clip_idx} has {motion.fps}."
+                )
+            if motion.has_object != reference.has_object:
+                raise ValueError("All clips must either contain an object or not contain one.")
+            if not torch.equal(motion._joint_indexes, reference._joint_indexes):
+                raise ValueError("All clips must map to the same robot joint order.")
+            if not torch.equal(motion._body_indexes, reference._body_indexes):
+                raise ValueError("All clips must map to the same robot body order.")
+
+    def _refresh_metadata(self) -> None:
+        first_motion = self.motions[0]
+        self.num_clips = len(self.motions)
+        self.fps = first_motion.fps
+        self.has_object = first_motion.has_object
+        self._joint_indexes = first_motion._joint_indexes
+        self._body_indexes = first_motion._body_indexes
+        self.clip_lengths = torch.tensor(
+            [motion.time_step_total for motion in self.motions],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.time_step_total = int(self.clip_lengths.max().item())
+
+    def extend_clip_with_segments(self, clip_idx: int, segments: dict[str, torch.Tensor], prepend: bool) -> None:
+        self.motions[clip_idx] = self.motions[clip_idx].extend_with_segments(segments, prepend=prepend)
+        self._refresh_metadata()
+
+    def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLibrary:
+        if self.num_clips != 1:
+            raise RuntimeError("extend_with_segments is only available for single-clip motion libraries.")
+        self.extend_clip_with_segments(0, segments, prepend=prepend)
+        return self
+
+    def clip_lengths_for(self, clip_ids: torch.Tensor) -> torch.Tensor:
+        return self.clip_lengths[clip_ids.to(device=self.device, dtype=torch.long)]
+
+    def gather(
+        self,
+        attr_name: str,
+        time_steps: torch.Tensor,
+        clip_ids: torch.Tensor,
+        index: int | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if time_steps.numel() == 0:
+            raise ValueError("time_steps must not be empty when gathering motion data.")
+
+        time_steps = time_steps.to(device=self.device, dtype=torch.long)
+        clip_ids = clip_ids.to(device=self.device, dtype=torch.long)
+        if clip_ids.ndim == 1 and time_steps.ndim > 1:
+            clip_ids = clip_ids.unsqueeze(-1).expand(time_steps.shape)
+        elif clip_ids.shape != time_steps.shape:
+            raise ValueError(
+                f"clip_ids shape {tuple(clip_ids.shape)} is incompatible with time_steps shape {tuple(time_steps.shape)}."
+            )
+
+        flat_steps = time_steps.reshape(-1)
+        flat_clip_ids = clip_ids.reshape(-1)
+        flat_result: torch.Tensor | None = None
+
+        for clip_id in torch.unique(flat_clip_ids).tolist():
+            clip_mask = flat_clip_ids == clip_id
+            clip_motion = self.motions[clip_id]
+            clip_steps = torch.clamp(flat_steps[clip_mask], 0, clip_motion.time_step_total - 1)
+            values = getattr(clip_motion, attr_name)[clip_steps]
+            if index is not None:
+                values = values[:, index]
+            if flat_result is None:
+                flat_result = torch.empty(
+                    (flat_steps.shape[0],) + values.shape[1:],
+                    dtype=values.dtype,
+                    device=values.device,
+                )
+            flat_result[clip_mask] = values
+
+        assert flat_result is not None
+        return flat_result.reshape(time_steps.shape + flat_result.shape[1:])
+
+    def __getattr__(self, name: str) -> Any:
+        if self.num_clips == 1:
+            return getattr(self.motions[0], name)
+        raise AttributeError(f"{self.__class__.__name__!s} has no attribute {name!r}")
+
+
 class AdaptiveTimestepsSampler:
     """Prioritizes training on motion segments where the robot fails most often."""
 
@@ -287,22 +398,32 @@ class MotionCommand(CommandTermBase):
         robot_joint_names = self._env.simulator.dof_names  # type: ignore[attr-defined]
 
         # 1. load motion data
-        self.motion: MotionLoader = MotionLoader(
-            self.motion_cfg.motion_file,
+        motion_files = self._resolve_motion_files()
+        self.motion = MotionLibrary(
+            motion_files,
             robot_body_names_alias,
             robot_joint_names,
             device=self.device,
         )
+        self.is_multi_clip = self.motion.num_clips > 1
 
         # Store body and joint indexes for interpolation
         self._body_indexes_in_motion = self.motion._body_indexes
         self._joint_indexes_in_motion = self.motion._joint_indexes
 
-        # Maybe prepend interpolated transition from default pose
-        self._maybe_add_default_pose_transition(prepend=True)
+        if self.is_multi_clip and (
+            self.motion_cfg.enable_default_pose_prepend or self.motion_cfg.enable_default_pose_append
+        ):
+            logger.warning(
+                "Skipping default-pose interpolation for multi-clip motion loading. "
+                "Disable prepend/append explicitly for large-scale multi-clip training."
+            )
+        else:
+            # Maybe prepend interpolated transition from default pose
+            self._maybe_add_default_pose_transition(prepend=True)
 
-        # Maybe append interpolated transition back to default pose
-        self._maybe_add_default_pose_transition(prepend=False)
+            # Maybe append interpolated transition back to default pose
+            self._maybe_add_default_pose_transition(prepend=False)
 
         # 2. get the indexes of the root link and the tracked links
         self.ref_body_index = robot_body_names.index(self.motion_cfg.body_name_ref[0])  # int
@@ -322,11 +443,14 @@ class MotionCommand(CommandTermBase):
 
         # 4. get the adaptive timesteps sampler
         if self.motion_cfg.use_adaptive_timesteps_sampler:
+            if self.is_multi_clip:
+                raise ValueError("Adaptive timestep sampling is only supported for single-clip training.")
             self.adaptive_timesteps_sampler = AdaptiveTimestepsSampler(
                 self.motion.time_step_total, self.device, int(1 / (self._env.dt))
             )
 
-        # 5. metrics
+        # 5. clip-sampling state and metrics
+        self.base_clip_sampling_weights = self._compute_base_clip_sampling_weights()
         self.metrics: dict[str, torch.Tensor] = {}
 
         self.init_buffers()
@@ -341,7 +465,9 @@ class MotionCommand(CommandTermBase):
         if env_ids.numel() == 0:
             return
 
-        # 0. Sample the time steps
+        self._update_clip_sampling_stats(env_ids)
+
+        # 0. Sample the time steps and clips
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             phase = self.adaptive_timesteps_sampler.sample(env_ids.numel())
         else:
@@ -349,8 +475,13 @@ class MotionCommand(CommandTermBase):
 
         if self._env.is_evaluating:
             phase = torch.zeros_like(phase)
+            sampled_clip_ids = torch.zeros(env_ids.numel(), dtype=torch.long, device=self.device)
+        else:
+            sampled_clip_ids = self._sample_clip_ids(env_ids.numel())
 
-        self.time_steps[env_ids] = (phase * (self.motion.time_step_total - 1)).long()
+        self.clip_ids[env_ids] = sampled_clip_ids
+        clip_lengths = self.motion.clip_lengths_for(self.clip_ids[env_ids])
+        self.time_steps[env_ids] = (phase * (clip_lengths - 1)).long()
 
         # Handle start_at_timestep_zero_prob
         prob = self.motion_cfg.start_at_timestep_zero_prob
@@ -364,9 +495,12 @@ class MotionCommand(CommandTermBase):
 
         # If the motion is at the last timestep, set it to the second last timestep;
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
-        already_last_timestep_mask = self.time_steps[env_ids] == self.motion.time_step_total - 1
+        last_valid_start = torch.clamp(clip_lengths - 2, min=0)
+        already_last_timestep_mask = self.time_steps[env_ids] >= clip_lengths - 1
         self.time_steps[env_ids] = torch.where(
-            already_last_timestep_mask, self.motion.time_step_total - 2, self.time_steps[env_ids]
+            already_last_timestep_mask,
+            last_valid_start,
+            self.time_steps[env_ids],
         )
 
         # 1. Get the reference root/body poses
@@ -447,10 +581,15 @@ class MotionCommand(CommandTermBase):
         self._env.simulator.dof_pos[env_ids] = target_dof_pos
         self._env.simulator.dof_vel[env_ids] = target_dof_vel
 
-        self._env.simulator.robot_root_states[env_ids, :3] = target_root_pos
-        self._env.simulator.robot_root_states[env_ids, 3:7] = target_root_rot
-        self._env.simulator.robot_root_states[env_ids, 7:10] = target_root_lin_vel
-        self._env.simulator.robot_root_states[env_ids, 10:13] = target_root_ang_vel
+        # IsaacSim uses RootStatesProxy, where partial slice writes update only the
+        # xyzw view and can leave the backing wxyz tensor stale.
+        # Build full rows and assign once so both views stay synchronized.
+        target_root_states = self._env.simulator.robot_root_states[env_ids].clone()
+        target_root_states[:, :3] = target_root_pos
+        target_root_states[:, 3:7] = target_root_rot
+        target_root_states[:, 7:10] = target_root_lin_vel
+        target_root_states[:, 10:13] = target_root_ang_vel
+        self._env.simulator.robot_root_states[env_ids] = target_root_states
 
         # 4. Set the object states in simulator
         if self.motion.has_object:
@@ -486,7 +625,9 @@ class MotionCommand(CommandTermBase):
                 freeze_mask = (rand_vals < freeze_prob) & zero_mask
                 advance_mask = advance_mask & ~freeze_mask
 
-        self.time_steps += advance_mask.long()
+        next_time_steps = self.time_steps + advance_mask.long()
+        clip_max_steps = torch.clamp(self.motion.clip_lengths_for(self.clip_ids) - 1, min=0)
+        self.time_steps[:] = torch.minimum(next_time_steps, clip_max_steps)
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
@@ -550,54 +691,52 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self.motion.joint_pos[self.time_steps]
+        return self._gather_motion("joint_pos", self.time_steps)
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self.motion.joint_vel[self.time_steps]
+        return self._gather_motion("joint_vel", self.time_steps)
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return (
-            self.motion.body_pos_w[self.time_steps][:, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, :]
-        )
+        body_pos = self._gather_motion("body_pos_w", self.time_steps, index=self.tracked_body_indexes)
+        return body_pos + self._env.simulator.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._gather_motion("body_quat_w", self.time_steps, index=self.tracked_body_indexes)
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._gather_motion("body_lin_vel_w", self.time_steps, index=self.tracked_body_indexes)
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._gather_motion("body_ang_vel_w", self.time_steps, index=self.tracked_body_indexes)
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.ref_body_index] + self._env.simulator.scene.env_origins
+        return self._gather_motion("body_pos_w", self.time_steps, index=self.ref_body_index) + self._env.simulator.scene.env_origins
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, self.ref_body_index]
+        return self._gather_motion("body_quat_w", self.time_steps, index=self.ref_body_index)
 
     @property
     def root_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, 0] + self._env.simulator.scene.env_origins
+        return self._gather_motion("body_pos_w", self.time_steps, index=0) + self._env.simulator.scene.env_origins
 
     @property
     def root_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, 0]
+        return self._gather_motion("body_quat_w", self.time_steps, index=0)
 
     @property
     def ref_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps, self.ref_body_index]
+        return self._gather_motion("body_lin_vel_w", self.time_steps, index=self.ref_body_index)
 
     @property
     def ref_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps, self.ref_body_index]
+        return self._gather_motion("body_ang_vel_w", self.time_steps, index=self.ref_body_index)
 
     #########################################################################################
     ## Robot from simulator
@@ -664,15 +803,15 @@ class MotionCommand(CommandTermBase):
     @property
     def object_pos_w(self) -> torch.Tensor:
         # Applies env origins, but ideally we should rely on the simulator
-        return self.motion.object_pos_w[self.time_steps] + self._env.simulator.scene.env_origins
+        return self._gather_motion("object_pos_w", self.time_steps) + self._env.simulator.scene.env_origins
 
     @property
     def object_quat_w(self) -> torch.Tensor:
-        return self.motion.object_quat_w[self.time_steps]
+        return self._gather_motion("object_quat_w", self.time_steps)
 
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.object_lin_vel_w[self.time_steps]
+        return self._gather_motion("object_lin_vel_w", self.time_steps)
 
     #########################################################################################
     ## Object from simulator
@@ -695,6 +834,7 @@ class MotionCommand(CommandTermBase):
 
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(
             self.num_envs, len(self.motion_cfg.body_names_to_track), 3, device=self.device
         )  # type: ignore[arg-type]
@@ -702,6 +842,10 @@ class MotionCommand(CommandTermBase):
             self.num_envs, len(self.motion_cfg.body_names_to_track), 4, device=self.device
         )  # type: ignore[arg-type]
         self.body_quat_relative_w[:, :, 0] = 1.0
+        self.clip_episode_count = torch.zeros(self.motion.num_clips, dtype=torch.float32, device=self.device)
+        self.clip_success_count = torch.zeros(self.motion.num_clips, dtype=torch.float32, device=self.device)
+        self.clip_sampling_weights = self.base_clip_sampling_weights.clone()
+        self.completed_episodes_since_adaptive_update = 0
 
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
@@ -731,6 +875,12 @@ class MotionCommand(CommandTermBase):
         self.metrics["motion/error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
         self.metrics["motion/error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
 
+        if self.is_multi_clip:
+            clip_prob = self.clip_sampling_weights / self.clip_sampling_weights.sum()
+            self.metrics["motion/active_clip_id"] = self.clip_ids.float()
+            self.metrics["motion/clip_sampling_entropy"] = -(clip_prob * (clip_prob + 1e-12).log()).sum()
+            self.metrics["motion/clip_sampling_top1_prob"] = clip_prob.max()
+
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()
             self.metrics["motion/adaptive_timesteps_sampler_entropy"] = self.adaptive_timesteps_sampler.metrics[
@@ -746,6 +896,91 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
+    def _resolve_motion_files(self) -> list[str]:
+        motion_files: list[str] = []
+        if self.motion_cfg.motion_files:
+            motion_files.extend(self.motion_cfg.motion_files)
+        elif self.motion_cfg.motion_glob:
+            resolved_glob = resolve_data_file_path(self.motion_cfg.motion_glob)
+            motion_files.extend(sorted(glob.glob(resolved_glob)))
+        else:
+            motion_files.append(self.motion_cfg.motion_file)
+
+        if not motion_files:
+            raise ValueError("No motion files resolved for MotionCommand.")
+
+        logger.info(f"Resolved {len(motion_files)} motion clip(s) for training.")
+        return motion_files
+
+    def _gather_motion(
+        self,
+        attr_name: str,
+        time_steps: torch.Tensor,
+        index: int | torch.Tensor | None = None,
+        clip_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        active_clip_ids = self.clip_ids if clip_ids is None else clip_ids
+        return self.motion.gather(attr_name, time_steps, active_clip_ids, index=index)
+
+    def _compute_base_clip_sampling_weights(self) -> torch.Tensor:
+        if self.motion_cfg.clip_weighting_strategy == "uniform_step":
+            weights = self.motion.clip_lengths.float()
+        else:
+            weights = torch.ones(self.motion.num_clips, dtype=torch.float32, device=self.device)
+        return weights / weights.sum()
+
+    def _sample_clip_ids(self, num_samples: int) -> torch.Tensor:
+        if self.motion.num_clips == 1:
+            return torch.zeros(num_samples, dtype=torch.long, device=self.device)
+        return torch.multinomial(self.clip_sampling_weights, num_samples, replacement=True)
+
+    def _update_clip_sampling_stats(self, env_ids: torch.Tensor) -> None:
+        if self.motion.num_clips == 1 or env_ids.numel() == 0:
+            return
+
+        completed_mask = self._env._pending_episode_lengths[env_ids] > 0
+        if not torch.any(completed_mask):
+            return
+
+        finished_env_ids = env_ids[completed_mask]
+        finished_clip_ids = self.clip_ids[finished_env_ids]
+        finished_clip_lengths = self.motion.clip_lengths_for(finished_clip_ids)
+        reached_motion_end = self.time_steps[finished_env_ids] >= finished_clip_lengths - 2
+        reached_timeout = self._env.time_out_buf[finished_env_ids].bool()
+        successful_episode = reached_motion_end | reached_timeout
+
+        self.clip_episode_count += torch.bincount(
+            finished_clip_ids,
+            minlength=self.motion.num_clips,
+        ).to(dtype=self.clip_episode_count.dtype)
+        self.clip_success_count += torch.bincount(
+            finished_clip_ids[successful_episode],
+            minlength=self.motion.num_clips,
+        ).to(dtype=self.clip_success_count.dtype)
+
+        if self.motion_cfg.clip_weighting_strategy != "success_rate_adaptive":
+            return
+
+        self.completed_episodes_since_adaptive_update += int(finished_env_ids.numel())
+        if self.completed_episodes_since_adaptive_update < self.motion_cfg.adaptive_clip_weight_update_interval:
+            return
+
+        success_rates = self.clip_success_count / torch.clamp(self.clip_episode_count, min=1.0)
+        adaptive_factors = 1.0 / (success_rates + 0.05)
+        valid_mask = self.clip_episode_count > 0
+        if valid_mask.any():
+            adaptive_factors = adaptive_factors / adaptive_factors[valid_mask].mean()
+        adaptive_factors = adaptive_factors.clamp(
+            min=self.motion_cfg.min_weight_factor,
+            max=self.motion_cfg.max_weight_factor,
+        )
+        updated_weights = self.base_clip_sampling_weights * adaptive_factors
+        self.clip_sampling_weights = updated_weights / updated_weights.sum()
+        self.completed_episodes_since_adaptive_update = 0
+
+    def motion_end_mask(self) -> torch.Tensor:
+        return self.time_steps >= self.motion.clip_lengths_for(self.clip_ids) - 2
+
     def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
         """Shared path for optionally inserting default-pose interpolation before/after the clip."""
         enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append
@@ -925,10 +1160,12 @@ class MotionCommand(CommandTermBase):
         dof_vel_backup = simulator.dof_vel[env_id].clone()
 
         try:
-            simulator.robot_root_states[env_id, :3] = root_pos + env_origin
-            simulator.robot_root_states[env_id, 3:7] = root_quat
-            simulator.robot_root_states[env_id, 7:10] = root_lin_vel
-            simulator.robot_root_states[env_id, 10:13] = root_ang_vel
+            target_root_state = simulator.robot_root_states[env_id].clone()
+            target_root_state[:3] = root_pos + env_origin
+            target_root_state[3:7] = root_quat
+            target_root_state[7:10] = root_lin_vel
+            target_root_state[10:13] = root_ang_vel
+            simulator.robot_root_states[env_id] = target_root_state
             simulator.dof_pos[env_id] = joint_pos
             simulator.dof_vel[env_id] = joint_vel
 

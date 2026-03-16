@@ -247,13 +247,109 @@ g1_29dof_wbt_future_motion_no_key_body = replace(
     observation=observation.g1_29dof_wbt_observation_future_motion_no_key_body,
 )
 
+g1_29dof_wbt_future_motion_lafan_multiclip = replace(
+    g1_29dof_wbt_future_motion,
+    training=TrainingConfig(
+        project="WholeBodyTracking",
+        name="g1_29dof_wbt_future_motion_lafan_multiclip",
+        num_envs=1024,
+    ),
+    algo=replace(
+        g1_29dof_wbt_future_motion.algo,
+        config=replace(
+            g1_29dof_wbt_future_motion.algo.config,
+            num_learning_iterations=100000,
+            save_interval=500,
+            entropy_coef=0.0025,
+            desired_kl=0.02,
+            num_learning_epochs=5,
+            actor_learning_rate=1e-3,
+            critic_learning_rate=1e-3,
+            init_noise_std=0.5,
+        ),
+    ),
+    simulator=replace(
+        simulator.mjwarp,
+        config=replace(
+            simulator.mjwarp.config,
+            sim=replace(
+                simulator.mjwarp.config.sim,
+                max_episode_length_s=20.0,
+            ),
+        ),
+    ),
+    command=command.g1_29dof_wbt_command_lafan_multiclip,
+    randomization=randomization.g1_29dof_wbt_randomization_lafan_pretrain,
+    termination=termination.g1_29dof_wbt_termination_lafan_pretrain,
+)
+
+g1_29dof_wbt_lafan_videomimic_stage1 = replace(
+    g1_29dof_wbt,
+    training=TrainingConfig(
+        project="WholeBodyTracking",
+        name="g1_29dof_wbt_lafan_videomimic_stage1",
+        num_envs=4096,
+    ),
+    algo=replace(
+        algo.ppo,
+        config=replace(
+            algo.ppo.config,
+            num_learning_iterations=100000,
+            save_interval=500,
+            entropy_coef=0.005,
+            init_noise_std=0.8,
+            init_at_random_ep_len=False,
+            use_symmetry=False,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            desired_kl=0.02,
+            actor_learning_rate=1e-3,
+            critic_learning_rate=1e-3,
+            actor_optimizer=replace(algo.ppo.config.actor_optimizer, weight_decay=0.000),
+            critic_optimizer=replace(algo.ppo.config.critic_optimizer, weight_decay=0.000),
+            module_dict=replace(
+                algo.ppo.config.module_dict,
+                actor=replace(
+                    algo.ppo.config.module_dict.actor,
+                    input_dim=["actor_state_history", "actor_tracking_history", "actor_targets"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.actor.layer_config,
+                        hidden_dims=[1024, 512, 256, 128],
+                        activation="ELU",
+                    ),
+                ),
+                critic=replace(
+                    algo.ppo.config.module_dict.critic,
+                    input_dim=["critic_obs", "actor_state_history", "actor_tracking_history", "actor_targets"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.critic.layer_config,
+                        hidden_dims=[1024, 512, 256, 128],
+                        activation="ELU",
+                    ),
+                ),
+            ),
+        ),
+    ),
+    robot=replace(
+        g1_29dof_wbt.robot,
+        control=replace(g1_29dof_wbt.robot.control, action_scale=0.25),
+    ),
+    observation=observation.g1_29dof_wbt_observation_lafan_videomimic_stage1,
+    termination=termination.g1_29dof_wbt_termination_lafan_videomimic_stage1,
+    command=command.g1_29dof_wbt_command_lafan_multiclip,
+    randomization=randomization.g1_29dof_wbt_randomization_lafan_pretrain,
+    reward=reward.g1_29dof_wbt_reward_lafan_videomimic_stage1,
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_future_motion",
+    "g1_29dof_wbt_future_motion_lafan_multiclip",
     "g1_29dof_wbt_future_motion_no_key_body",
+    "g1_29dof_wbt_lafan_videomimic_stage1",
 ]
 
 """

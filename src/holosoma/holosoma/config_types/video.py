@@ -75,10 +75,15 @@ class FixedCameraConfig:
     """Absolute camera target position in world coordinates [x, y, z]."""
 
 
-# Discriminated union for camera configurations
+# NOTE:
+# Pydantic dataclasses can fail when a field both uses an Annotated discriminator
+# and also provides a dataclass default/default_factory on the containing config.
+# Keep the discriminated alias for documentation/type use, but use the plain union
+# for the actual VideoConfig field below.
 CameraConfig = Annotated[
     Union[SphericalCameraConfig, CartesianCameraConfig, FixedCameraConfig], Field(discriminator="type")
 ]
+CameraConfigPlain = Union[SphericalCameraConfig, CartesianCameraConfig, FixedCameraConfig]
 
 
 @dataclass(frozen=True)
@@ -121,7 +126,7 @@ class VideoConfig:
     record_env_id: int = 0
     """Which environment to record (for multi-environment simulations)."""
 
-    camera: CameraConfig = field(default_factory=CartesianCameraConfig)
+    camera: CameraConfigPlain = field(default_factory=CartesianCameraConfig)
     """Camera configuration with automatic type discrimination based on 'type' field.
 
     Note: Camera-specific settings like smoothing and tracking_body_name are now part of the

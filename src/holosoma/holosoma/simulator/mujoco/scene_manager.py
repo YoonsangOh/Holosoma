@@ -122,14 +122,22 @@ class MujocoSceneManager:
         # self.world_spec.visual.quality.shadowsize = 1024
 
         # Arbitrary lights (offset XY to avoid gantry shadows)
-        self.world_spec.worldbody.add_light(
+        light_kwargs = dict(
             pos=[2, 0, 5.0],
             dir=[0, 0, -1],
             diffuse=[0.4, 0.4, 0.4],
             specular=[0.1, 0.1, 0.1],
             # castshadow=True,
-            type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         )
+        # MuJoCo python APIs differ by version:
+        # - newer builds expose mjtLightType + "type" kwarg
+        # - older builds accept "directional=True" kwarg
+        light_type = getattr(getattr(mujoco, "mjtLightType", None), "mjLIGHT_DIRECTIONAL", None)
+        if light_type is not None:
+            light_kwargs["type"] = light_type
+        else:
+            light_kwargs["directional"] = True
+        self.world_spec.worldbody.add_light(**light_kwargs)
 
         # Second light for extra shadows, commented out a little experience performance.
         # self.world_spec.worldbody.add_light(

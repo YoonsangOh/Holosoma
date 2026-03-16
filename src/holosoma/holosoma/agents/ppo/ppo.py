@@ -140,8 +140,8 @@ class PPO(BaseAlgo):
         # Observation manager system - history is defined per-module in module_dict
         assert self.env.observation_manager is not None
         self.algo_history_length_dict = {
-            "actor_obs": self.env.observation_manager.cfg.groups["actor_obs"].history_length,
-            "critic_obs": self.env.observation_manager.cfg.groups["critic_obs"].history_length,
+            group_name: group_cfg.history_length
+            for group_name, group_cfg in self.env.observation_manager.cfg.groups.items()
         }
 
         self.num_act = self.env.robot_config.actions_dim
@@ -826,7 +826,7 @@ class PPO(BaseAlgo):
                     # Get ALL body positions from motion and simulator (30 bodies, excluding contact points)
                     # motion.body_pos_w[time_steps] gives [num_envs, num_bodies, 3] but needs env_origins added
                     ref_body_pos_all = (
-                        motion_cmd.motion.body_pos_w[motion_cmd.time_steps] 
+                        motion_cmd._gather_motion("body_pos_w", motion_cmd.time_steps)
                         + env.simulator.scene.env_origins[:, None, :]
                     )  # [num_envs, 32, 3]
                     robot_body_pos_all = env.simulator._rigid_body_pos  # [num_envs, 32, 3]

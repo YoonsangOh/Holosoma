@@ -163,6 +163,8 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         self._wrapped_actor = self._create_actor_wrapper(actor_model)
 
         motion = motion_command.motion
+        if hasattr(motion, "motions"):
+            motion = motion.motions[0]
 
         joint_pos = motion.joint_pos
         joint_vel = motion.joint_vel

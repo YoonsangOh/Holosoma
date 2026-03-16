@@ -6,6 +6,7 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation,
     g1_29dof_wbt_observation_future_motion,
     g1_29dof_wbt_observation_future_motion_no_key_body,
+    g1_29dof_wbt_observation_lafan_videomimic_stage1,
     g1_29dof_wbt_observation_w_object,
 )
 
@@ -19,4 +20,5 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object": g1_29dof_wbt_observation_w_object,
     "g1_29dof_wbt_future_motion": g1_29dof_wbt_observation_future_motion,
     "g1_29dof_wbt_future_motion_no_key_body": g1_29dof_wbt_observation_future_motion_no_key_body,
+    "g1_29dof_wbt_lafan_videomimic_stage1": g1_29dof_wbt_observation_lafan_videomimic_stage1,
 }

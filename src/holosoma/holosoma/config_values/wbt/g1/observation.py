@@ -199,9 +199,171 @@ g1_29dof_wbt_observation_future_motion_no_key_body = ObservationManagerCfg(
     },
 )
 
+actor_state_history_videomimic_stage1 = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=True,
+    history_length=5,
+    terms={
+        "actions": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:actions",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "base_ang_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            scale=1.0,
+            noise=0.2,
+        ),
+        "dof_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_pos",
+            scale=1.0,
+            noise=0.01,
+        ),
+        "dof_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_vel",
+            scale=1.0,
+            noise=0.5,
+        ),
+        "projected_gravity": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:projected_gravity",
+            scale=1.0,
+            noise=0.05,
+        ),
+    },
+)
+
+actor_tracking_history_videomimic_stage1 = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=True,
+    history_length=5,
+    terms={
+        "torso_xy_rel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:torso_xy_rel",
+            scale=1.0,
+            noise=0.02,
+        ),
+        "torso_yaw_rel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:torso_yaw_rel",
+            scale=1.0,
+            noise=0.05,
+        ),
+    },
+)
+
+actor_targets_videomimic_stage1 = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "target_joint_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:target_joint_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "target_root_roll_pitch": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:target_root_roll_pitch",
+            scale=1.0,
+            noise=0.0,
+        ),
+    },
+)
+
+critic_obs_videomimic_stage1 = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "actions": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:actions",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "base_ang_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "base_lin_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "motion_command": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_command",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "motion_ref_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_ref_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "motion_ref_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_ref_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "projected_gravity": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:projected_gravity",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "robot_body_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:robot_body_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "robot_body_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:robot_body_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "target_joint_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:target_joint_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "target_root_roll_pitch": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:target_root_roll_pitch",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_xy_rel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:torso_xy_rel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_yaw_rel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:torso_yaw_rel",
+            scale=1.0,
+            noise=0.0,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_lafan_videomimic_stage1 = ObservationManagerCfg(
+    groups={
+        "actor_state_history": actor_state_history_videomimic_stage1,
+        "actor_tracking_history": actor_tracking_history_videomimic_stage1,
+        "actor_targets": actor_targets_videomimic_stage1,
+        "critic_obs": critic_obs_videomimic_stage1,
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_future_motion",
     "g1_29dof_wbt_observation_future_motion_no_key_body",
+    "g1_29dof_wbt_observation_lafan_videomimic_stage1",
 ]

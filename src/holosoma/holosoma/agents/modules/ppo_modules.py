@@ -72,19 +72,21 @@ class PPOActor(nn.Module):
 
     def update_distribution(self, actor_obs):
         mean = self.actor(actor_obs)
+        zero_like_mean = torch.zeros_like(mean)
+        safe_std = torch.nan_to_num(self.std, nan=1.0, posinf=1.0, neginf=1.0)
         if self.min_noise_std:
-            clamped_std = torch.clamp(self.std, min=self.min_noise_std)
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+            clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
+            self.distribution = Normal(mean, zero_like_mean + clamped_std)
         elif self.min_mean_noise_std:
-            current_mean = self.std.mean()
+            current_mean = safe_std.mean()
             if current_mean < self.min_mean_noise_std:
                 scale_up = self.min_mean_noise_std / (current_mean + 1e-6)
-                clamped_std = self.std * scale_up
+                clamped_std = safe_std * scale_up
             else:
-                clamped_std = self.std
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+                clamped_std = safe_std
+            self.distribution = Normal(mean, zero_like_mean + clamped_std)
         else:
-            self.distribution = Normal(mean, mean * 0.0 + self.std)
+            self.distribution = Normal(mean, zero_like_mean + safe_std)
 
     def act(self, policy_state_dict):
         self.update_distribution(policy_state_dict["actor_obs"])
@@ -284,19 +286,21 @@ class PPOActorWithMotionEncoder(nn.Module):
         """Update action distribution with combined input."""
         combined_input = torch.cat([actor_obs, motion_latent], dim=-1)
         mean = self.actor_module(combined_input)
+        zero_like_mean = torch.zeros_like(mean)
+        safe_std = torch.nan_to_num(self.std, nan=1.0, posinf=1.0, neginf=1.0)
         if self.min_noise_std:
-            clamped_std = torch.clamp(self.std, min=self.min_noise_std)
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+            clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
+            self.distribution = Normal(mean, zero_like_mean + clamped_std)
         elif self.min_mean_noise_std:
-            current_mean = self.std.mean()
+            current_mean = safe_std.mean()
             if current_mean < self.min_mean_noise_std:
                 scale_up = self.min_mean_noise_std / (current_mean + 1e-6)
-                clamped_std = self.std * scale_up
+                clamped_std = safe_std * scale_up
             else:
-                clamped_std = self.std
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+                clamped_std = safe_std
+            self.distribution = Normal(mean, zero_like_mean + clamped_std)
         else:
-            self.distribution = Normal(mean, mean * 0.0 + self.std)
+            self.distribution = Normal(mean, zero_like_mean + safe_std)
     
     def act(self, policy_state_dict):
         """Sample action from distribution."""

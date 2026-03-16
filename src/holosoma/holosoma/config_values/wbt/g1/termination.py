@@ -1,5 +1,7 @@
 """Whole Body Tracking termination presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.termination import TerminationManagerCfg, TerminationTermCfg
 
 g1_29dof_wbt_termination = TerminationManagerCfg(
@@ -50,4 +52,54 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_termination"]
+g1_29dof_wbt_termination_lafan_pretrain = replace(
+    g1_29dof_wbt_termination,
+    terms={
+        **g1_29dof_wbt_termination.terms,
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination.terms["bad_tracking"],
+            params={
+                **g1_29dof_wbt_termination.terms["bad_tracking"].params,
+                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_ori_threshold": 1.2,
+                "bad_motion_body_pos_threshold": 0.5,
+            },
+        ),
+    },
+)
+
+g1_29dof_wbt_termination_lafan_videomimic_stage1 = TerminationManagerCfg(
+    terms={
+        "timeout": g1_29dof_wbt_termination.terms["timeout"],
+        "motion_ends": g1_29dof_wbt_termination.terms["motion_ends"],
+        "tracked_body_position_error_threshold": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:TrackedBodyPositionErrorThreshold",
+            params={
+                "threshold": 0.5,
+                "min_steps_before_check": 2,
+                "body_names_to_track": [
+                    "pelvis",
+                    "left_hip_roll_link",
+                    "left_knee_link",
+                    "left_ankle_roll_link",
+                    "right_hip_roll_link",
+                    "right_knee_link",
+                    "right_ankle_roll_link",
+                    "torso_link",
+                    "left_shoulder_roll_link",
+                    "left_elbow_link",
+                    "left_wrist_yaw_link",
+                    "right_shoulder_roll_link",
+                    "right_elbow_link",
+                    "right_wrist_yaw_link",
+                ],
+            },
+        ),
+    }
+)
+
+__all__ = [
+    "g1_29dof_wbt_termination",
+    "g1_29dof_wbt_termination_lafan_pretrain",
+    "g1_29dof_wbt_termination_lafan_videomimic_stage1",
+]

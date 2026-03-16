@@ -39,7 +39,9 @@ class WholeBodyTrackingManager(BaseTask):
         self.default_dof_pos = self.default_dof_pos_base.repeat(self.num_envs, 1).clone()  # (num_envs, num_dof)
 
     def _pre_compute_observations_callback(self):
-        self.base_quat.copy_(self.simulator.base_quat)
+        # MuJoCo-Warp quaternion views do not implement torch's `.copy_`.
+        # Keep a direct reference to simulator quaternion storage so all backends work.
+        self.base_quat = self.simulator.base_quat
 
     def _reset_buffers_callback(self, env_ids, target_buf=None):
         self.need_to_refresh_envs[env_ids] = True
@@ -121,7 +123,11 @@ class WholeBodyTrackingManager(BaseTask):
         rand = torch.rand(len(env_ids), 6, device=self.device) * 2 - 1
         self.push_robot_vel_buf[env_ids].copy_(rand * max_vel_tensor.unsqueeze(0))
         self.record_push_robot_vel_buf[env_ids].copy_(self.push_robot_vel_buf[env_ids])
-        self.simulator.robot_root_states[env_ids, 7:13].copy_(self.push_robot_vel_buf[env_ids])
+        # IsaacSim root states use a proxy with quaternion conversion; slice .copy_() can
+        # bypass proxy synchronization. Assign full rows to keep xyzw/wxyz buffers in sync.
+        target_root_states = self.simulator.robot_root_states[env_ids].clone()
+        target_root_states[:, 7:13] = self.push_robot_vel_buf[env_ids]
+        self.simulator.robot_root_states[env_ids] = target_root_states
         # Push impulses only take effect in the simulator once we write the mutated root state tensor back.
         self.simulator.set_actor_root_state_tensor_robots(env_ids, self.simulator.robot_root_states)
         self._max_push_vel = max_vel_tensor.clone()
@@ -132,6 +138,9 @@ class WholeBodyTrackingManager(BaseTask):
 
     def _draw_debug_vis_isaacsim(self):
         motion_command = self.command_manager.get_state("motion_command")
+        # In headless/no-viewer runs visualization markers are not created.
+        if not hasattr(motion_command, "visualization_markers"):
+            return
         # torso link
         real_robot_pos_xyz = motion_command.robot_ref_pos_w.clone()
         real_robot_quat_xyzw = motion_command.robot_ref_quat_w.clone()
@@ -200,7 +209,7 @@ class WholeBodyTrackingManager(BaseTask):
 
         # set root_states_from_motion_command
         root_pos = motion_command.root_pos_w.clone()
-        root_ori = motion_command.root_quat_w.clone()  # wxyz
+        root_ori = motion_command.root_quat_w.clone()  # xyzw
         root_lin_vel = motion_command.body_lin_vel_w[:, 0].clone()
         root_ang_vel = motion_command.body_ang_vel_w[:, 0].clone()
 
@@ -211,10 +220,14 @@ class WholeBodyTrackingManager(BaseTask):
         self.simulator.dof_pos[env_ids].copy_(joint_pos)
         self.simulator.dof_vel[env_ids].copy_(joint_vel)
 
-        self.simulator.robot_root_states[env_ids, :3].copy_(root_pos)
-        self.simulator.robot_root_states[env_ids, 3:7].copy_(root_ori)
-        self.simulator.robot_root_states[env_ids, 7:10].copy_(root_lin_vel)
-        self.simulator.robot_root_states[env_ids, 10:13].copy_(root_ang_vel)
+        # IsaacSim root states use a proxy with quaternion conversion; slice .copy_() can
+        # bypass proxy synchronization. Assign full rows to keep xyzw/wxyz buffers in sync.
+        target_root_states = self.simulator.robot_root_states[env_ids].clone()
+        target_root_states[:, :3] = root_pos
+        target_root_states[:, 3:7] = root_ori
+        target_root_states[:, 7:10] = root_lin_vel
+        target_root_states[:, 10:13] = root_ang_vel
+        self.simulator.robot_root_states[env_ids] = target_root_states
 
         self.simulator.set_actor_root_state_tensor(env_ids, self.simulator.all_root_states)
         self.simulator.set_dof_state_tensor(env_ids, self.simulator.dof_state)
@@ -232,10 +245,20 @@ class WholeBodyTrackingManager(BaseTask):
             object_states[:, 10:13] = torch.zeros_like(object_lin_vel[:])
             self.simulator.set_actor_states(["object"], env_ids, object_states)
 
-        self.simulator.scene.write_data_to_sim()
-        self.simulator.sim.forward()
-        self.simulator.sim.render()
-        self.simulator.refresh_sim_tensors()
+        # IsaacSim replay must perform a full sim step to propagate written articulation
+        # root/DOF states into the renderer and replicator capture.
+        if self.simulator.get_simulator_type() == SimulatorType.ISAACSIM:
+            if hasattr(self.simulator, "_sim_step_counter"):
+                self.simulator._sim_step_counter += 1
+            self.simulator.scene.write_data_to_sim()
+            self.simulator.sim.step(render=True)
+            self.simulator.scene.update(dt=1.0 / self.simulator.simulator_config.sim.fps)
+            self.simulator.refresh_sim_tensors()
+        else:
+            self.simulator.scene.write_data_to_sim()
+            self.simulator.sim.forward()
+            self.simulator.sim.render()
+            self.simulator.refresh_sim_tensors()
 
         time.sleep(dt)
 
